@@ -8,6 +8,10 @@ def run_gui():
     root = tk.Tk()
     root.title("X.ai Auto Login - Trình quản lý tài khoản")
     root.geometry("900x600")
+    
+    style = ttk.Style()
+    if "clam" in style.theme_names():
+        style.theme_use("clam")
 
     # Layout chính: Trái (nhập liệu + 2 bảng), Phải (Log)
     left_frame = tk.Frame(root)
@@ -85,6 +89,7 @@ def run_gui():
     queue_table.column("email", width=150)
     queue_table.column("pass", width=100)
     queue_table.column("status", width=100, anchor="center")
+    queue_table.tag_configure("running", background="#fff3cd")
     queue_table.pack(fill=tk.BOTH, expand=True, pady=5)
 
     # -- LOGIC CHẠY HÀNG LOẠT --
@@ -105,91 +110,136 @@ def run_gui():
 
         is_running = True
         
-        def worker():
-            nonlocal is_running
-            import time
-            while True:
-                items = queue_table.get_children()
-                running_count = sum(1 for item in items if queue_table.item(item, "values")[3] == "🚀 Đang chạy...")
-                
+        try:
+            max_t = int(max_threads_var.get())
+        except ValueError:
+            max_t = 5
+            
+        import queue
+        task_queue = queue.Queue()
+        active_tasks = 0
+        active_lock = threading.Lock()
+        
+        def browser_worker():
+            nonlocal active_tasks
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
                 try:
-                    max_t = int(max_threads_var.get())
-                except ValueError:
-                    max_t = 5
+                    browser = p.chromium.launch(
+                        channel="chrome", 
+                        headless=False,
+                        args=['--disable-blink-features=AutomationControlled']
+                    )
+                except Exception as e:
+                    log_msg(f"Lỗi khởi động trình duyệt: {e}")
+                    return
                     
-                pending_items = []
-                for item in items:
-                    val = queue_table.item(item, "values")
-                    if len(val) >= 4 and val[3] == "⏳ Đang chờ":
-                        ac = val[4] if len(val) > 4 else "False"
-                        np = val[5] if len(val) > 5 else ""
-                        pending_items.append((item, val[0], val[1], val[2], ac, np))
-                
-                if not pending_items:
-                    # Kiểm tra xem có đang chạy cái nào không
-                    if running_count == 0:
-                        break # Xong tất cả
-                    time.sleep(1)
-                    continue
-                
-                # Nếu đã chạy tối đa số luồng thì đợi
-                if running_count >= max_t:
-                    time.sleep(1)
-                    continue
-                
-                # Số lượng tài khoản được phép mở thêm
-                allowed_to_start = max_t - running_count
-                items_to_start = pending_items[:allowed_to_start]
-                
-                for item_info in items_to_start:
-                    fi, item_stt, email, pwd, ac, np = item_info
+                while True:
+                    task = task_queue.get()
+                    if task is None: # Tín hiệu dừng
+                        break
+                        
+                    with active_lock:
+                        active_tasks += 1
+                        
+                    fi, item_stt, email, pwd, ac, np = task
                     
                     # Cập nhật GUI thành Đang chạy...
-                    root.after(0, lambda i=fi, s=item_stt, e=email, p=pwd, ac=ac, np=np: queue_table.item(i, values=(s, e, p, "🚀 Đang chạy...", ac, np)))
+                    root.after(0, lambda i=fi, s=item_stt, e=email, p=pwd, ac=ac, np=np: queue_table.item(i, values=(s, e, p, "🚀 Đang chạy...", ac, np), tags=("running",)) if queue_table.exists(i) else None)
                     
-                    def run_account(fi_cb=fi, e_cb=email, p_cb=pwd, ac_cb=ac, np_cb=np):
-                        log_msg(f"\n--- Bắt đầu chạy: {e_cb} ---")
-                        status_text = "❌ Lỗi / Timeout"
-                        signout_text = "N/A"
-                        pwd_text = "N/A"
-                        result_text = "Fail"
-                        try:
-                            is_auto = (ac_cb == "True")
-                            res = login(e_cb, p_cb, log_msg, auto_change=is_auto, new_pwd=np_cb)
-                            if res is not None:
-                                has_sg, signed_out, pwd_changed = res
-                                if has_sg is True:
-                                    status_text = "🌟 CÓ (SuperGrok)"
-                                elif has_sg is False:
-                                    status_text = "⚪ KHÔNG (Thường)"
-                                else:
-                                    status_text = "⚠️ KHÔNG RÕ"
-                                signout_text = "✅ Rồi" if signed_out else "❌ Chưa"
-                                pwd_text = "✅ Rồi" if pwd_changed else "❌ Chưa"
-                                
-                                if has_sg and signed_out and pwd_changed:
-                                    result_text = "✅ Pass"
-                                else:
-                                    result_text = "❌ Fail"
-                        except Exception as ex:
-                            log_msg(f"Lỗi Bot ({e_cb}): {str(ex)}")
+                    prefix = email.split('@')[0]
+                    def thread_log(msg):
+                        log_msg(f"[{prefix}] {msg}")
                         
-                        def update_tables(f=fi_cb, e2=e_cb, p2=p_cb, st=status_text, so=signout_text, pt=pwd_text, rt=result_text):
-                            if queue_table.exists(f):
-                                queue_table.delete(f)
-                            completed_stt = len(completed_table.get_children()) + 1
-                            completed_table.insert("", tk.END, values=(completed_stt, e2, p2, st, so, pt, rt))
-                        
-                        root.after(0, update_tables)
+                    thread_log(f"--- Bắt đầu chạy ---")
+                    status_text = "❌ Lỗi / Timeout"
+                    signout_text = "N/A"
+                    pwd_text = "N/A"
+                    result_text = "Fail"
+                    final_pwd = pwd
                     
-                    # Khởi chạy thread riêng cho tài khoản này
-                    threading.Thread(target=run_account, daemon=True).start()
-                    time.sleep(1.5) # Tránh mở quá nhiều tab cùng 1 giây gây đơ máy
+                    try:
+                        is_auto = (ac == "True")
+                        res = login(browser, email, pwd, thread_log, auto_change=is_auto, new_pwd=np)
+                        if res is not None:
+                            has_sg, signed_out, pwd_changed = res
+                            if has_sg is True:
+                                status_text = "🌟 CÓ (SuperGrok)"
+                            elif has_sg is False:
+                                status_text = "⚪ KHÔNG (Thường)"
+                            else:
+                                status_text = "⚠️ KHÔNG RÕ"
+                            signout_text = "✅ Rồi" if signed_out else "❌ Chưa"
+                            pwd_text = "✅ Rồi" if pwd_changed else "❌ Chưa"
+                            if pwd_changed:
+                                final_pwd = np
+                            
+                            if has_sg and signed_out and pwd_changed:
+                                result_text = "✅ Pass"
+                            else:
+                                result_text = "❌ Fail"
+                    except Exception as ex:
+                        log_msg(f"Lỗi Bot ({email}): {str(ex)}")
+                    
+                    def update_tables(f=fi, e2=email, p2=final_pwd, st=status_text, so=signout_text, pt=pwd_text, rt=result_text):
+                        if queue_table.exists(f):
+                            queue_table.delete(f)
+                        completed_stt = len(completed_table.get_children()) + 1
+                        tag = "pass" if "Pass" in rt else "fail"
+                        completed_table.insert("", tk.END, values=(completed_stt, e2, p2, st, so, pt, rt), tags=(tag,))
+                    
+                    root.after(0, update_tables)
+                    
+                    with active_lock:
+                        active_tasks -= 1
+                    task_queue.task_done()
+                    
+                browser.close()
+
+        def dispatcher():
+            nonlocal is_running
+            import time
             
+            # Khởi tạo pool
+            threads = []
+            for _ in range(max_t):
+                t = threading.Thread(target=browser_worker, daemon=True)
+                t.start()
+                threads.append(t)
+                
+            dispatched = set()
+            
+            while True:
+                items = queue_table.get_children()
+                pending_count = 0
+                
+                for item in items:
+                    if item not in dispatched:
+                        val = queue_table.item(item, "values")
+                        if len(val) >= 4 and val[3] == "⏳ Đang chờ":
+                            ac = val[4] if len(val) > 4 else "False"
+                            np = val[5] if len(val) > 5 else ""
+                            task_queue.put((item, val[0], val[1], val[2], ac, np))
+                            dispatched.add(item)
+                            pending_count += 1
+                
+                with active_lock:
+                    current_active = active_tasks
+                    
+                # Hết việc
+                if len(queue_table.get_children()) == 0 and task_queue.empty() and current_active == 0:
+                    break
+                    
+                time.sleep(1)
+                
+            # Dừng các thread
+            for _ in range(max_t):
+                task_queue.put(None)
+                
             is_running = False
             log_msg("\n--- Hoàn thành tất cả các tiến trình ---")
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=dispatcher, daemon=True).start()
 
     # -- Khu vực BẢNG ĐÃ CHẠY (Bên trái - Dưới cùng) --
     tk.Label(left_frame, text="Bảng kết quả:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(10, 0))
@@ -209,6 +259,8 @@ def run_gui():
     completed_table.column("signout", width=80, anchor="center")
     completed_table.column("pwd_changed", width=80, anchor="center")
     completed_table.column("result", width=80, anchor="center")
+    completed_table.tag_configure("pass", background="#d4edda")
+    completed_table.tag_configure("fail", background="#f8d7da")
     completed_table.pack(fill=tk.BOTH, expand=True, pady=5)
 
     def on_double_click(event):
