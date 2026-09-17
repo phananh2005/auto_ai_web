@@ -34,17 +34,31 @@ def run_gui():
     email_entry.grid(row=0, column=1, padx=5, pady=2)
 
     tk.Label(input_frame, text="Mật khẩu:").grid(row=1, column=0, sticky="w", pady=2)
-    password_entry = tk.Entry(input_frame, width=35, show="*")
+    password_entry = tk.Entry(input_frame, width=35)
     password_entry.grid(row=1, column=1, padx=5, pady=2)
+
+    auto_change_var = tk.BooleanVar(value=False)
+    auto_change_cb = tk.Checkbutton(input_frame, text="Đổi mật khẩu mới:", variable=auto_change_var)
+    auto_change_cb.grid(row=2, column=0, sticky="w", pady=2)
+    
+    new_password_entry = tk.Entry(input_frame, width=35)
+    new_password_entry.grid(row=2, column=1, padx=5, pady=2)
 
     def add_to_queue():
         email = email_entry.get().strip()
         pwd = password_entry.get().strip()
+        auto_change = auto_change_var.get()
+        new_pwd = new_password_entry.get().strip()
+        
         if not email or not pwd:
             messagebox.showwarning("Thiếu", "Nhập đủ email và mật khẩu.")
             return
+        if auto_change and not new_pwd:
+            messagebox.showwarning("Thiếu", "Vui lòng nhập mật khẩu mới.")
+            return
+            
         stt = len(queue_table.get_children()) + 1
-        queue_table.insert("", tk.END, values=(stt, email, pwd, "⏳ Đang chờ"))
+        queue_table.insert("", tk.END, values=(stt, email, pwd, "⏳ Đang chờ", str(auto_change), new_pwd))
         email_entry.delete(0, tk.END)
         password_entry.delete(0, tk.END)
         
@@ -52,17 +66,17 @@ def run_gui():
         process_queue(auto_start=True)
 
     add_btn = tk.Button(input_frame, text="Thêm vào danh sách", command=add_to_queue)
-    add_btn.grid(row=2, column=1, sticky="w", pady=5)
+    add_btn.grid(row=3, column=1, sticky="w", pady=5)
     
-    tk.Label(input_frame, text="Số tài khoản chạy song song:").grid(row=3, column=0, sticky="w", pady=2)
+    tk.Label(input_frame, text="Số tài khoản chạy song song:").grid(row=4, column=0, sticky="w", pady=2)
     max_threads_var = tk.StringVar(value="5")
     max_threads_entry = tk.Entry(input_frame, textvariable=max_threads_var, width=10)
-    max_threads_entry.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+    max_threads_entry.grid(row=4, column=1, sticky="w", padx=5, pady=2)
 
     # -- Khu vực BẢNG PHÒNG CHỜ (Bên trái - Giữa) --
     tk.Label(left_frame, text="Đang chạy:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(10, 0))
-    columns_q = ("stt", "email", "pass", "status")
-    queue_table = ttk.Treeview(left_frame, columns=columns_q, show="headings", height=8)
+    columns_q = ("stt", "email", "pass", "status", "auto_change", "new_pwd")
+    queue_table = ttk.Treeview(left_frame, columns=columns_q, show="headings", height=8, displaycolumns=("stt", "email", "pass", "status"))
     queue_table.heading("stt", text="STT")
     queue_table.heading("email", text="Email")
     queue_table.heading("pass", text="Password")
@@ -107,7 +121,9 @@ def run_gui():
                 for item in items:
                     val = queue_table.item(item, "values")
                     if len(val) >= 4 and val[3] == "⏳ Đang chờ":
-                        pending_items.append((item, val[0], val[1], val[2]))
+                        ac = val[4] if len(val) > 4 else "False"
+                        np = val[5] if len(val) > 5 else ""
+                        pending_items.append((item, val[0], val[1], val[2], ac, np))
                 
                 if not pending_items:
                     # Kiểm tra xem có đang chạy cái nào không
@@ -126,19 +142,22 @@ def run_gui():
                 items_to_start = pending_items[:allowed_to_start]
                 
                 for item_info in items_to_start:
-                    fi, item_stt, email, pwd = item_info
+                    fi, item_stt, email, pwd, ac, np = item_info
                     
                     # Cập nhật GUI thành Đang chạy...
-                    root.after(0, lambda i=fi, s=item_stt, e=email, p=pwd: queue_table.item(i, values=(s, e, p, "🚀 Đang chạy...")))
+                    root.after(0, lambda i=fi, s=item_stt, e=email, p=pwd, ac=ac, np=np: queue_table.item(i, values=(s, e, p, "🚀 Đang chạy...", ac, np)))
                     
-                    def run_account(fi_cb=fi, e_cb=email, p_cb=pwd):
+                    def run_account(fi_cb=fi, e_cb=email, p_cb=pwd, ac_cb=ac, np_cb=np):
                         log_msg(f"\n--- Bắt đầu chạy: {e_cb} ---")
                         status_text = "❌ Lỗi / Timeout"
                         signout_text = "N/A"
+                        pwd_text = "N/A"
+                        result_text = "Fail"
                         try:
-                            res = login(e_cb, p_cb, log_msg)
+                            is_auto = (ac_cb == "True")
+                            res = login(e_cb, p_cb, log_msg, auto_change=is_auto, new_pwd=np_cb)
                             if res is not None:
-                                has_sg, signed_out = res
+                                has_sg, signed_out, pwd_changed = res
                                 if has_sg is True:
                                     status_text = "🌟 CÓ (SuperGrok)"
                                 elif has_sg is False:
@@ -146,14 +165,20 @@ def run_gui():
                                 else:
                                     status_text = "⚠️ KHÔNG RÕ"
                                 signout_text = "✅ Rồi" if signed_out else "❌ Chưa"
+                                pwd_text = "✅ Rồi" if pwd_changed else "❌ Chưa"
+                                
+                                if has_sg and signed_out and pwd_changed:
+                                    result_text = "✅ Pass"
+                                else:
+                                    result_text = "❌ Fail"
                         except Exception as ex:
                             log_msg(f"Lỗi Bot ({e_cb}): {str(ex)}")
                         
-                        def update_tables(f=fi_cb, e2=e_cb, p2=p_cb, st=status_text, so=signout_text):
+                        def update_tables(f=fi_cb, e2=e_cb, p2=p_cb, st=status_text, so=signout_text, pt=pwd_text, rt=result_text):
                             if queue_table.exists(f):
                                 queue_table.delete(f)
                             completed_stt = len(completed_table.get_children()) + 1
-                            completed_table.insert("", tk.END, values=(completed_stt, e2, p2, st, so))
+                            completed_table.insert("", tk.END, values=(completed_stt, e2, p2, st, so, pt, rt))
                         
                         root.after(0, update_tables)
                     
@@ -168,19 +193,40 @@ def run_gui():
 
     # -- Khu vực BẢNG ĐÃ CHẠY (Bên trái - Dưới cùng) --
     tk.Label(left_frame, text="Bảng kết quả:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(10, 0))
-    columns_c = ("stt", "email", "pass", "supergrok", "signout")
+    columns_c = ("stt", "email", "pass", "supergrok", "signout", "pwd_changed", "result")
     completed_table = ttk.Treeview(left_frame, columns=columns_c, show="headings", height=8)
     completed_table.heading("stt", text="STT")
     completed_table.heading("email", text="Email")
     completed_table.heading("pass", text="Password")
     completed_table.heading("supergrok", text="SuperGrok")
     completed_table.heading("signout", text="Đăng xuất")
+    completed_table.heading("pwd_changed", text="Đổi MK")
+    completed_table.heading("result", text="Kết quả")
     completed_table.column("stt", width=40, anchor="center")
     completed_table.column("email", width=150)
     completed_table.column("pass", width=100)
     completed_table.column("supergrok", width=100, anchor="center")
     completed_table.column("signout", width=80, anchor="center")
+    completed_table.column("pwd_changed", width=80, anchor="center")
+    completed_table.column("result", width=80, anchor="center")
     completed_table.pack(fill=tk.BOTH, expand=True, pady=5)
+
+    def on_double_click(event):
+        item = completed_table.identify_row(event.y)
+        column = completed_table.identify_column(event.x)
+        if item and column:
+            try:
+                col_idx = int(column.replace('#', '')) - 1
+                values = completed_table.item(item, 'values')
+                if col_idx < len(values):
+                    cell_value = str(values[col_idx])
+                    root.clipboard_clear()
+                    root.clipboard_append(cell_value)
+                    log_msg(f"📋 Đã copy: {cell_value}")
+            except Exception:
+                pass
+                
+    completed_table.bind("<Double-1>", on_double_click)
 
     export_frame = tk.Frame(left_frame)
     export_frame.pack(fill=tk.X, pady=5)
@@ -200,8 +246,8 @@ def run_gui():
         with open(path, "w", encoding="utf-8") as f:
             for item in completed_table.get_children():
                 val = completed_table.item(item, "values")
-                if len(val) < 5: continue
-                stt, e, p, status, signout = val
+                if len(val) < 7: continue
+                stt, e, p, status, signout, pwd_changed_status, result_status = val
                 
                 if f_val == "Có SuperGrok" and "CÓ" not in status:
                     continue
@@ -213,7 +259,7 @@ def run_gui():
                 f.write(f"{e}|{p}\n")
         messagebox.showinfo("Thành công", f"Đã xuất file {path}")
         
-    export_btn = tk.Button(export_frame, text="Xuất file", command=do_export)
+    export_btn = tk.Button(export_frame, text="Xuất file", command=do_export, state=tk.DISABLED)
     export_btn.pack(side=tk.LEFT, padx=5)
 
     root.mainloop()

@@ -1,4 +1,4 @@
-def login(email, password, log=print):
+def login(email, password, log=print, auto_change=False, new_pwd=""):
     from playwright.sync_api import sync_playwright
     log("🚀 Khởi động trình duyệt...")
     with sync_playwright() as p:
@@ -11,6 +11,14 @@ def login(email, password, log=print):
             )
             context = browser.new_context() # new_context() mặc định là ẩn danh
             page = context.new_page()
+            
+            def handle_cap(loc):
+                log("🤖 Tự động click Captcha ngầm...")
+                loc.click()
+                page.wait_for_timeout(3000)
+            page.add_locator_handler(page.locator('input[aria-label="Xác minh bạn là con người"]'), handle_cap)
+            for i in range(5):
+                page.add_locator_handler(page.frame_locator('iframe').nth(i).locator('input[type="checkbox"]'), handle_cap)
         except Exception as e:
             raise Exception(f"Lỗi khởi động trình duyệt: {str(e)}")
         
@@ -35,26 +43,6 @@ def login(email, password, log=print):
         
         page.locator('input[type="password"]').fill(password)
         wait_human()
-        
-        log("⏳ Chờ xử lý xác minh bảo mật (Cloudflare/Captcha)...")
-        page.wait_for_timeout(random.randint(5000, 8000))
-        
-        try:
-            cb = page.locator('input[aria-label="Xác minh bạn là con người"]')
-            if cb.is_visible():
-                log("🤖 Đang click xác minh con người...")
-                cb.click()
-                page.wait_for_timeout(random.randint(3000, 5000))
-            else:
-                for frame in page.frames:
-                    fcb = frame.locator('input[type="checkbox"]')
-                    if fcb.count() > 0 and fcb.first.is_visible():
-                        log("🤖 Đang click xác minh con người (iframe)...")
-                        fcb.first.click()
-                        page.wait_for_timeout(random.randint(3000, 5000))
-                        break
-        except Exception:
-            pass
         
         log("➡️ Đang gửi yêu cầu đăng nhập...")
         page.get_by_test_id("sign-in-submit").click()
@@ -107,6 +95,7 @@ def login(email, password, log=print):
         page.wait_for_timeout(2000)
         
         signed_out = False
+        pwd_changed = False
         try:
             log("🔌 Đang click nút 'Sign out of all devices'...")
             # Nút có text "Sign out of all devices"
@@ -114,8 +103,27 @@ def login(email, password, log=print):
             page.wait_for_timeout(2000)
             log("✅ Đã Sign out thành công.")
             signed_out = True
+            
+            if auto_change and new_pwd:
+                log("🔄 Đang click nút Change mật khẩu...")
+                try:
+                    page.locator('#security button:has-text("Change")').click(timeout=10000)
+                    page.wait_for_timeout(2000)
+                    
+                    # Điền form đổi mật khẩu
+                    page.locator('input[name="oldPassword"]').fill(password)
+                    page.wait_for_timeout(500)
+                    page.locator('input[name="password"]').fill(new_pwd)
+                    page.wait_for_timeout(500)
+                    page.locator('button:has-text("Save password")').click(timeout=10000)
+                    page.wait_for_timeout(2000)
+                    log("✅ Đã gửi yêu cầu lưu mật khẩu mới.")
+                    pwd_changed = True
+                except Exception as e:
+                    log(f"⚠️ Lỗi khi đổi mật khẩu: {e}")
+                    
         except Exception as e:
             log(f"⚠️ Không thể click nút Sign out: {e}")
 
         log("🛑 Kết thúc tiến trình.")
-        return has_sg, signed_out
+        return has_sg, signed_out, pwd_changed
