@@ -1,14 +1,8 @@
-def login(email, password, log=print, auto_change=False, new_pwd=""):
-    from playwright.sync_api import sync_playwright
-    log("🚀 Khởi động trình duyệt...")
-    with sync_playwright() as p:
+def login(browser, email, password, log=print, auto_change=False, new_pwd=""):
+    # Dummy block to preserve indentation
+    if True:
         try:
-            # Khởi chạy trình duyệt (luôn ẩn danh / không lưu lịch sử)
-            browser = p.chromium.launch(
-                channel="chrome", 
-                headless=False,
-                args=['--disable-blink-features=AutomationControlled']
-            )
+            # Không khởi tạo browser ở đây nữa, dùng chung browser được truyền vào
             context = browser.new_context() # new_context() mặc định là ẩn danh
             page = context.new_page()
             
@@ -20,7 +14,7 @@ def login(email, password, log=print, auto_change=False, new_pwd=""):
             for i in range(5):
                 page.add_locator_handler(page.frame_locator('iframe').nth(i).locator('input[type="checkbox"]'), handle_cap)
         except Exception as e:
-            raise Exception(f"Lỗi khởi động trình duyệt: {str(e)}")
+            raise Exception(f"Lỗi tạo context: {str(e)}")
         
         import random
         def wait_human():
@@ -87,10 +81,16 @@ def login(email, password, log=print, auto_change=False, new_pwd=""):
                 
         except Exception as e:
             log(f"⛔ Lỗi khi kiểm tra trạng thái Grok: {e}")
-            has_sg = None
+            has_sg = False
         
-        log("✅ Hoàn tất. Đang quay về tab tài khoản...")
         grok_page.close()
+        
+        if not has_sg:
+            log("🛑 Tài khoản KHÔNG CÓ SuperGrok. Dừng xử lý các bước tiếp theo.")
+            if 'context' in locals(): context.close()
+            return False, False, False
+            
+        log("✅ Hoàn tất check Grok. Đang quay về tab tài khoản...")
         page.bring_to_front()
         page.wait_for_timeout(2000)
         
@@ -105,6 +105,11 @@ def login(email, password, log=print, auto_change=False, new_pwd=""):
             signed_out = True
             
             if auto_change and new_pwd:
+                if not signed_out:
+                    log("🛑 Lỗi Sign Out. Hủy thao tác đổi mật khẩu.")
+                    if 'context' in locals(): context.close()
+                    return has_sg, False, False
+                    
                 log("🔄 Đang click nút Change mật khẩu...")
                 try:
                     page.locator('#security button:has-text("Change")').click(timeout=10000)
@@ -126,4 +131,6 @@ def login(email, password, log=print, auto_change=False, new_pwd=""):
             log(f"⚠️ Không thể click nút Sign out: {e}")
 
         log("🛑 Kết thúc tiến trình.")
+        if 'context' in locals():
+            context.close()
         return has_sg, signed_out, pwd_changed
